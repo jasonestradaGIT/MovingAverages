@@ -2,6 +2,10 @@
 
 A Streamlit app for exploring laboratory result moving averages by analyte and instrument.
 
+Current working version: `0.2.0`
+
+License: BSD 3-Clause. See [LICENSE](LICENSE).
+
 ## Setup
 
 Create and activate a virtual environment:
@@ -52,6 +56,20 @@ Visualization modes:
 - `Combined instruments`: pools the selected instruments in date/time order and shows one combined moving-average line, while still showing the selected instruments' raw result markers.
 
 Charts use a high-contrast color palette designed to remain legible in both light and dark Streamlit themes.
+
+Each moving-average line includes statistical reference lines:
+
+- `mean`: mean of that line's moving-average graph points.
+- `+1 SD`: one sample standard deviation above that moving-average mean.
+- `-1 SD`: one sample standard deviation below that moving-average mean.
+- `+2 SD`: two sample standard deviations above that moving-average mean.
+- `-2 SD`: two sample standard deviations below that moving-average mean.
+
+These reference lines are recalculated when the moving-average point count changes.
+Use `Show mean and SD reference lines` to show or hide all reference lines for the current analyte with one click. When shown, the reference lines are grouped with their moving-average line in the legend and can still be toggled individually.
+Each overview and instrument chart includes a statistics table with the moving-average window size, number of moving-average values, mean, SD, mean +/-1 SD, mean +/-2 SD, and median. The median is shown in the table but is not graphed.
+Use `Instrument charts` to show separate charts for each selected instrument. This section is expanded by default and appears before the analyte data table. Each instrument chart has its own mean/SD reference-line checkbox.
+Each instrument chart also includes a collapsed `Additional graphs` section with three views: a raw-result time-series chart, an MA-value normal distribution, and a raw-result normal distribution. The raw-result time-series chart includes its own statistics table and mean, +/-1 SD, and +/-2 SD line control. Both distribution charts include a fitted normal curve, fixed 95% cutoff lines, optional custom confidence-level cutoff lines, and side-by-side statistics columns for the fixed and custom intervals. The intervals use `mean +/- z x sample SD`; they describe the fitted distribution rather than the confidence interval of the estimated mean.
 
 Each analyte tab also includes `Axis controls`:
 

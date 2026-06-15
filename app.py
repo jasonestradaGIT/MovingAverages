@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
 from io import StringIO
+from statistics import NormalDist
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from moving_averages import add_combined_moving_average, add_moving_average
+from version import APP_VERSION
 
 
 SAMPLE_CSV = """date,analyte,instrument,result
@@ -109,11 +112,86 @@ def style_chart(figure: go.Figure) -> go.Figure:
             xanchor="left",
             x=0,
             bgcolor="rgba(0,0,0,0)",
+            groupclick="toggleitem",
         ),
     )
     figure.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.22)")
     figure.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.22)")
     return figure
+
+
+def add_moving_average_reference_lines(
+    figure: go.Figure,
+    dates: pd.Series,
+    values: pd.Series,
+    label: str,
+    color: str,
+    legend_group: str,
+) -> None:
+    moving_average_values = values.dropna()
+    if moving_average_values.empty:
+        return
+
+    mean = moving_average_values.mean()
+    standard_deviation = moving_average_values.std(ddof=1) if len(moving_average_values) > 1 else 0.0
+    x_range = [dates.min(), dates.max()]
+    reference_lines = [
+        ("mean", mean, "dot", 1.8),
+        ("+1 SD", mean + standard_deviation, "dash", 1.4),
+        ("-1 SD", mean - standard_deviation, "dash", 1.4),
+        ("+2 SD", mean + (2 * standard_deviation), "dashdot", 1.4),
+        ("-2 SD", mean - (2 * standard_deviation), "dashdot", 1.4),
+    ]
+
+    for statistic_name, y_value, dash_style, width in reference_lines:
+        figure.add_trace(
+            go.Scatter(
+                x=x_range,
+                y=[y_value, y_value],
+                mode="lines",
+                name=f"{label} {statistic_name}",
+                line=dict(color=color, dash=dash_style, width=width),
+                legendgroup=legend_group,
+                opacity=0.8,
+            )
+        )
+
+
+def moving_average_statistics(label: str, values: pd.Series, moving_average_points: int) -> dict[str, float | int | str]:
+    moving_average_values = values.dropna()
+    mean = moving_average_values.mean()
+    standard_deviation = moving_average_values.std(ddof=1) if len(moving_average_values) > 1 else 0.0
+    median = moving_average_values.median()
+    return {
+        "Line": label,
+        "MA Points": moving_average_points,
+        "MA Values": len(moving_average_values),
+        "Mean": mean,
+        "SD": standard_deviation,
+        "Mean + SD": mean + standard_deviation,
+        "Mean - SD": mean - standard_deviation,
+        "Mean + 2 SD": mean + (2 * standard_deviation),
+        "Mean - 2 SD": mean - (2 * standard_deviation),
+        "Median": median,
+    }
+
+
+def render_statistics_table(rows: list[dict[str, float | int | str]]) -> None:
+    stats = pd.DataFrame(rows)
+    numeric_columns = [
+        "Mean",
+        "SD",
+        "Mean + SD",
+        "Mean - SD",
+        "Mean + 2 SD",
+        "Mean - 2 SD",
+        "Median",
+    ]
+    st.dataframe(
+        stats.style.format({column: "{:.6g}" for column in numeric_columns}),
+        width="stretch",
+        hide_index=True,
+    )
 
 
 def format_timestamp(value: pd.Timestamp) -> str:
@@ -145,14 +223,22 @@ def apply_axis_settings(
     return figure
 
 
-def build_separate_instrument_chart(data: pd.DataFrame, analyte: str, instruments: list[str]) -> go.Figure:
+def build_separate_instrument_chart(
+    data: pd.DataFrame,
+    analyte: str,
+    instruments: list[str],
+    show_reference_lines: bool,
+    title: str | None = None,
+    color_map: dict[str, str] | None = None,
+) -> go.Figure:
     figure = go.Figure()
     filtered = data[data["instrument"].isin(instruments)]
-    colors = instrument_colors(instruments)
+    colors = color_map or instrument_colors(instruments)
 
     for instrument in instruments:
         instrument_data = filtered[filtered["instrument"] == instrument]
         color = colors[instrument]
+        moving_average_group = f"{instrument}_moving_average"
         figure.add_trace(
             go.Scatter(
                 x=instrument_data["date"],
@@ -171,14 +257,278 @@ def build_separate_instrument_chart(data: pd.DataFrame, analyte: str, instrument
                 mode="lines",
                 name=f"{instrument} moving average",
                 line=dict(color=color, width=3),
+                legendgroup=moving_average_group,
+                legendgrouptitle_text=f"{instrument} moving average",
+            )
+        )
+        if show_reference_lines:
+            add_moving_average_reference_lines(
+                figure,
+                instrument_data["date"],
+                instrument_data["moving_average"],
+                instrument,
+                color,
+                moving_average_group,
+            )
+
+    figure.update_layout(
+        title=title or f"{analyte} Results and Moving Average by Instrument",
+        hovermode="x unified",
+        xaxis_title=None,
+        yaxis_title="Result",
+    )
+    return style_chart(figure)
+
+
+def build_single_instrument_chart(
+    data: pd.DataFrame,
+    analyte: str,
+    instrument: str,
+    show_reference_lines: bool,
+    color_map: dict[str, str] | None = None,
+) -> go.Figure:
+    return build_separate_instrument_chart(
+        data,
+        analyte,
+        [instrument],
+        show_reference_lines,
+        title=f"{analyte} Moving Average - {instrument}",
+        color_map=color_map,
+    )
+
+
+def build_raw_result_chart(
+    data: pd.DataFrame,
+    analyte: str,
+    instrument: str,
+    show_reference_lines: bool,
+    color: str,
+) -> go.Figure:
+    figure = go.Figure()
+    legend_group = f"{instrument}_raw_results"
+    figure.add_trace(
+        go.Scatter(
+            x=data["date"],
+            y=data["result"],
+            mode="lines+markers",
+            name=f"{instrument} raw results",
+            line=dict(color=color, width=2.5),
+            marker=dict(color=color, size=7),
+            legendgroup=legend_group,
+            legendgrouptitle_text=f"{instrument} raw results",
+        )
+    )
+    if show_reference_lines:
+        add_moving_average_reference_lines(
+            figure,
+            data["date"],
+            data["result"],
+            instrument,
+            color,
+            legend_group,
+        )
+
+    figure.update_layout(
+        title=f"{analyte} Raw Results - {instrument}",
+        hovermode="x unified",
+        xaxis_title=None,
+        yaxis_title="Result",
+    )
+    return style_chart(figure)
+
+
+def raw_result_statistics(label: str, values: pd.Series) -> dict[str, float | int | str]:
+    result_values = values.dropna()
+    mean = result_values.mean()
+    standard_deviation = result_values.std(ddof=1) if len(result_values) > 1 else 0.0
+    return {
+        "Line": label,
+        "Result Values": len(result_values),
+        "Mean": mean,
+        "SD": standard_deviation,
+        "Mean + SD": mean + standard_deviation,
+        "Mean - SD": mean - standard_deviation,
+        "Mean + 2 SD": mean + (2 * standard_deviation),
+        "Mean - 2 SD": mean - (2 * standard_deviation),
+        "Median": result_values.median(),
+    }
+
+
+def render_raw_result_statistics(rows: list[dict[str, float | int | str]]) -> None:
+    stats = pd.DataFrame(rows)
+    numeric_columns = [
+        "Mean",
+        "SD",
+        "Mean + SD",
+        "Mean - SD",
+        "Mean + 2 SD",
+        "Mean - 2 SD",
+        "Median",
+    ]
+    st.dataframe(
+        stats.style.format({column: "{:.6g}" for column in numeric_columns}),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def normal_distribution_statistics(
+    values: pd.Series,
+    confidence_level: float = 0.95,
+) -> dict[str, float | int]:
+    moving_average_values = values.dropna()
+    mean = moving_average_values.mean()
+    standard_deviation = moving_average_values.std(ddof=1) if len(moving_average_values) > 1 else 0.0
+    alpha = 1 - confidence_level
+    tail_alpha = alpha / 2
+    z_value = NormalDist().inv_cdf(1 - tail_alpha)
+    margin = z_value * standard_deviation
+    return {
+        "Value Count": len(moving_average_values),
+        "Confidence Level": confidence_level,
+        "Alpha": alpha,
+        "Alpha per Tail": tail_alpha,
+        "Z Value": z_value,
+        "Mean": mean,
+        "Sample SD": standard_deviation,
+        "Margin": margin,
+        "Lower Cutoff": mean - margin,
+        "Upper Cutoff": mean + margin,
+    }
+
+
+def confidence_level_label(confidence_level: float) -> str:
+    return f"{confidence_level * 100:.6g}%"
+
+
+def render_normal_distribution_statistics(
+    statistics_sets: list[dict[str, float | int]],
+    value_count_label: str,
+) -> None:
+    statistic_fields = [
+        (value_count_label, "Value Count", 1),
+        ("Confidence level (%)", "Confidence Level", 100),
+        ("Alpha", "Alpha", 1),
+        ("Alpha per tail", "Alpha per Tail", 1),
+        ("Z value", "Z Value", 1),
+        ("Mean", "Mean", 1),
+        ("Sample SD", "Sample SD", 1),
+        ("Margin (Z x SD)", "Margin", 1),
+        ("Lower cutoff", "Lower Cutoff", 1),
+        ("Upper cutoff", "Upper Cutoff", 1),
+    ]
+    rows = [{"Statistic": label} for label, _, _ in statistic_fields]
+    value_columns = []
+    for index, statistics in enumerate(statistics_sets):
+        interval_label = confidence_level_label(statistics["Confidence Level"])
+        column = f"{interval_label} Interval" if index == 0 else f"{interval_label} Custom Interval"
+        value_columns.append(column)
+        for row, (_, field, multiplier) in zip(rows, statistic_fields):
+            row[column] = statistics[field] * multiplier
+
+    table = pd.DataFrame(rows)
+    st.dataframe(
+        table.style.format({column: "{:.6g}" for column in value_columns}),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def build_normal_distribution_chart(
+    values: pd.Series,
+    analyte: str,
+    instrument: str,
+    color: str,
+    value_label: str,
+    title_value_label: str,
+    custom_statistics: dict[str, float | int] | None = None,
+) -> go.Figure:
+    moving_average_values = values.dropna()
+    statistics = normal_distribution_statistics(moving_average_values)
+    mean = statistics["Mean"]
+    standard_deviation = statistics["Sample SD"]
+    figure = go.Figure()
+
+    figure.add_trace(
+        go.Histogram(
+            x=moving_average_values,
+            histnorm="probability density",
+            name=value_label,
+            marker=dict(color=color, opacity=0.58, line=dict(color=color, width=1)),
+        )
+    )
+
+    maximum_density = 1.0
+    if len(moving_average_values) > 1 and standard_deviation > 0:
+        minimum = moving_average_values.min()
+        maximum = moving_average_values.max()
+        padding = (maximum - minimum) * 0.15
+        if padding == 0:
+            padding = standard_deviation
+
+        x_start = minimum - padding
+        x_end = maximum + padding
+        x_values = [
+            x_start + (x_end - x_start) * index / 119
+            for index in range(120)
+        ]
+        normal_density = [
+            (1 / (standard_deviation * math.sqrt(2 * math.pi)))
+            * math.exp(-0.5 * ((value - mean) / standard_deviation) ** 2)
+            for value in x_values
+        ]
+        maximum_density = max(normal_density) * 1.12
+        figure.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=normal_density,
+                mode="lines",
+                name="Normal fit",
+                line=dict(color=color, width=3),
+            )
+        )
+
+    reference_lines = [
+        ("Mean", statistics["Mean"], "#facc15", "solid", 3),
+        ("Lower 95% cutoff", statistics["Lower Cutoff"], "#fb7185", "dash", 2),
+        ("Upper 95% cutoff", statistics["Upper Cutoff"], "#fb7185", "dash", 2),
+    ]
+    if custom_statistics is not None:
+        custom_label = confidence_level_label(custom_statistics["Confidence Level"])
+        reference_lines.extend(
+            [
+                (
+                    f"Lower {custom_label} cutoff",
+                    custom_statistics["Lower Cutoff"],
+                    "#a3e635",
+                    "dashdot",
+                    2,
+                ),
+                (
+                    f"Upper {custom_label} cutoff",
+                    custom_statistics["Upper Cutoff"],
+                    "#a3e635",
+                    "dashdot",
+                    2,
+                ),
+            ]
+        )
+    for label, x_value, line_color, dash_style, width in reference_lines:
+        figure.add_trace(
+            go.Scatter(
+                x=[x_value, x_value],
+                y=[0, maximum_density],
+                mode="lines",
+                name=f"{label}: {x_value:.6g}",
+                line=dict(color=line_color, dash=dash_style, width=width),
             )
         )
 
     figure.update_layout(
-        title=f"{analyte} Results and Moving Average by Instrument",
-        hovermode="x unified",
-        xaxis_title=None,
-        yaxis_title="Result",
+        title=f"{analyte} {title_value_label} Distribution - {instrument}",
+        bargap=0.08,
+        xaxis_title=title_value_label,
+        yaxis_title="Density",
     )
     return style_chart(figure)
 
@@ -188,6 +538,7 @@ def build_combined_instrument_chart(
     analyte: str,
     instruments: list[str],
     moving_average_points: int,
+    show_reference_lines: bool,
 ) -> go.Figure:
     figure = go.Figure()
     filtered = data[data["instrument"].isin(instruments)]
@@ -216,8 +567,19 @@ def build_combined_instrument_chart(
             mode="lines",
             name="Combined moving average",
             line=dict(color=COMBINED_LINE_COLOR, width=4),
+            legendgroup="combined_moving_average",
+            legendgrouptitle_text="Combined moving average",
         )
     )
+    if show_reference_lines:
+        add_moving_average_reference_lines(
+            figure,
+            combined_data["date"],
+            combined_data["combined_moving_average"],
+            "Combined",
+            COMBINED_LINE_COLOR,
+            "combined_moving_average",
+        )
 
     figure.update_layout(
         title=f"{analyte} Combined Moving Average",
@@ -246,6 +608,17 @@ with st.sidebar:
         max_value=100,
         value=5,
         help="Number of recent results per analyte and instrument used in the rolling average.",
+    )
+    st.markdown(
+        f"""
+        <div style="position: fixed; bottom: 0.75rem; left: 1rem; text-align: left;
+                    font-size: 0.72rem; opacity: 0.65; line-height: 1.3;">
+            Version {APP_VERSION}<br>
+            Copyright &copy; 2026 Jason Estrada<br>
+            Licensed under the BSD 3-Clause License.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 try:
@@ -281,6 +654,11 @@ for tab, analyte in zip(tabs, analytes):
             options=["Separate instruments", "Combined instruments"],
             horizontal=True,
             key=f"display_mode_{analyte}",
+        )
+        show_reference_lines = st.checkbox(
+            "Show mean and SD reference lines",
+            value=True,
+            key=f"show_reference_lines_{analyte}",
         )
 
         if not selected_instruments:
@@ -361,23 +739,221 @@ for tab, analyte in zip(tabs, analytes):
             st.warning("X start must be before X end.")
             continue
 
+        selected_instrument_colors = instrument_colors(selected_instruments)
+
         if display_mode == "Separate instruments":
-            chart = build_separate_instrument_chart(analyte_data, analyte, selected_instruments)
+            overview_stats = [
+                moving_average_statistics(
+                    instrument,
+                    analyte_data[analyte_data["instrument"] == instrument]["moving_average"],
+                    moving_average_points,
+                )
+                for instrument in selected_instruments
+            ]
+            render_statistics_table(overview_stats)
+            chart = build_separate_instrument_chart(
+                analyte_data,
+                analyte,
+                selected_instruments,
+                show_reference_lines,
+                color_map=selected_instrument_colors,
+            )
             st.plotly_chart(
                 apply_axis_settings(chart, y_axis_mode, y_min, y_max, x_axis_mode, x_start, x_end),
                 width="stretch",
             )
         else:
+            combined_data = add_combined_moving_average(filtered_data, moving_average_points)
+            render_statistics_table(
+                [
+                    moving_average_statistics(
+                        "Combined",
+                        combined_data["combined_moving_average"],
+                        moving_average_points,
+                    )
+                ]
+            )
             chart = build_combined_instrument_chart(
                 analyte_data,
                 analyte,
                 selected_instruments,
                 moving_average_points,
+                show_reference_lines,
             )
             st.plotly_chart(
                 apply_axis_settings(chart, y_axis_mode, y_min, y_max, x_axis_mode, x_start, x_end),
                 width="stretch",
             )
+
+        with st.expander("Instrument charts", expanded=True):
+            for instrument in selected_instruments:
+                instrument_data = analyte_data[analyte_data["instrument"] == instrument]
+                instrument_reference_lines = st.checkbox(
+                    f"Show mean and SD reference lines for {instrument}",
+                    value=True,
+                    key=f"show_reference_lines_{analyte}_{instrument}",
+                )
+                render_statistics_table(
+                    [
+                        moving_average_statistics(
+                            instrument,
+                            instrument_data["moving_average"],
+                            moving_average_points,
+                        )
+                    ]
+                )
+                instrument_chart = build_single_instrument_chart(
+                    instrument_data,
+                    analyte,
+                    instrument,
+                    instrument_reference_lines,
+                    color_map=selected_instrument_colors,
+                )
+                st.plotly_chart(
+                    apply_axis_settings(
+                        instrument_chart,
+                        y_axis_mode,
+                        y_min,
+                        y_max,
+                        x_axis_mode,
+                        x_start,
+                        x_end,
+                    ),
+                    width="stretch",
+                )
+                with st.container(border=True):
+                    show_additional_graphs = st.toggle(
+                        f"Additional graphs for {instrument}",
+                        value=False,
+                        key=f"show_additional_graphs_{analyte}_{instrument}",
+                    )
+                    if show_additional_graphs:
+                        st.markdown(f"#### Raw Result Chart - {instrument}")
+                        raw_result_reference_lines = st.checkbox(
+                            "Show mean and SD reference lines for raw results",
+                            value=True,
+                            key=f"raw_result_reference_lines_{analyte}_{instrument}",
+                        )
+                        render_raw_result_statistics(
+                            [raw_result_statistics(instrument, instrument_data["result"])]
+                        )
+                        raw_result_chart = build_raw_result_chart(
+                            instrument_data,
+                            analyte,
+                            instrument,
+                            raw_result_reference_lines,
+                            selected_instrument_colors[instrument],
+                        )
+                        st.plotly_chart(
+                            apply_axis_settings(
+                                raw_result_chart,
+                                y_axis_mode,
+                                y_min,
+                                y_max,
+                                x_axis_mode,
+                                x_start,
+                                x_end,
+                            ),
+                            width="stretch",
+                        )
+
+                        st.markdown(f"#### MA Value Distribution - {instrument}")
+                        ma_distribution_statistics = normal_distribution_statistics(
+                            instrument_data["moving_average"]
+                        )
+                        ma_custom_interval_enabled = st.toggle(
+                            "Add custom confidence interval for MA values",
+                            value=False,
+                            key=f"ma_custom_interval_enabled_{analyte}_{instrument}",
+                        )
+                        ma_custom_confidence_percent = st.number_input(
+                            "MA custom confidence level (%)",
+                            min_value=0.1,
+                            max_value=99.9,
+                            value=99.0,
+                            step=0.1,
+                            format="%.3f",
+                            disabled=not ma_custom_interval_enabled,
+                            key=f"ma_custom_confidence_percent_{analyte}_{instrument}",
+                        )
+                        ma_custom_distribution_statistics = None
+                        if ma_custom_interval_enabled:
+                            ma_custom_distribution_statistics = normal_distribution_statistics(
+                                instrument_data["moving_average"],
+                                ma_custom_confidence_percent / 100,
+                            )
+                        st.caption(
+                            "Fitted-normal intervals = mean +/- z x sample SD. "
+                            "They describe the distribution of MA values, not the confidence interval of the estimated mean."
+                        )
+                        ma_statistics_sets = [ma_distribution_statistics]
+                        if ma_custom_distribution_statistics is not None:
+                            ma_statistics_sets.append(ma_custom_distribution_statistics)
+                        render_normal_distribution_statistics(
+                            ma_statistics_sets,
+                            "MA values",
+                        )
+                        st.plotly_chart(
+                            build_normal_distribution_chart(
+                                instrument_data["moving_average"],
+                                analyte,
+                                instrument,
+                                selected_instrument_colors[instrument],
+                                "MA values",
+                                "MA Value",
+                                ma_custom_distribution_statistics,
+                            ),
+                            width="stretch",
+                        )
+
+                        st.markdown(f"#### Raw Result Distribution - {instrument}")
+                        raw_distribution_statistics = normal_distribution_statistics(
+                            instrument_data["result"]
+                        )
+                        raw_custom_interval_enabled = st.toggle(
+                            "Add custom confidence interval for raw results",
+                            value=False,
+                            key=f"raw_custom_interval_enabled_{analyte}_{instrument}",
+                        )
+                        raw_custom_confidence_percent = st.number_input(
+                            "Raw result custom confidence level (%)",
+                            min_value=0.1,
+                            max_value=99.9,
+                            value=99.0,
+                            step=0.1,
+                            format="%.3f",
+                            disabled=not raw_custom_interval_enabled,
+                            key=f"raw_custom_confidence_percent_{analyte}_{instrument}",
+                        )
+                        raw_custom_distribution_statistics = None
+                        if raw_custom_interval_enabled:
+                            raw_custom_distribution_statistics = normal_distribution_statistics(
+                                instrument_data["result"],
+                                raw_custom_confidence_percent / 100,
+                            )
+                        st.caption(
+                            "Fitted-normal intervals = mean +/- z x sample SD. "
+                            "They describe the distribution of raw results, not the confidence interval of the estimated mean."
+                        )
+                        raw_statistics_sets = [raw_distribution_statistics]
+                        if raw_custom_distribution_statistics is not None:
+                            raw_statistics_sets.append(raw_custom_distribution_statistics)
+                        render_normal_distribution_statistics(
+                            raw_statistics_sets,
+                            "Raw result values",
+                        )
+                        st.plotly_chart(
+                            build_normal_distribution_chart(
+                                instrument_data["result"],
+                                analyte,
+                                instrument,
+                                selected_instrument_colors[instrument],
+                                "Raw results",
+                                "Raw Result",
+                                raw_custom_distribution_statistics,
+                            ),
+                            width="stretch",
+                        )
 
         with st.expander("View analyte data"):
             st.dataframe(filtered_data[DISPLAY_COLUMNS], width="stretch")
